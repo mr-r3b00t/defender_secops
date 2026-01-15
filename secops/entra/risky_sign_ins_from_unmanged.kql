@@ -1,0 +1,57 @@
+let window = 30d;
+let CommonUserCountries = (
+    SigninLogs
+    | where TimeGenerated > ago(window)
+    | where ResultType == "0"
+    | extend BaselineCountry = tostring(LocationDetails.countryOrRegion)
+    | where isnotempty(BaselineCountry)
+    | summarize SignInCount = count() by UserPrincipalName, BaselineCountry
+    | summarize arg_max(SignInCount, BaselineCountry) by UserPrincipalName
+    | project
+        UserPrincipalName,
+        CommonCountry = BaselineCountry,
+        CommonCountryCount = SignInCount
+);
+SigninLogs
+| where TimeGenerated > ago(31d)
+| where ResultType in ("50074", "50076", "500121")
+| extend TrustType = tostring(DeviceDetail.trustType)
+| where TrustType != "Hybrid Azure AD joined"
+| extend MFA_Country = tostring(LocationDetails.countryOrRegion)
+| extend MFA_State   = tostring(LocationDetails.state)
+| extend MFA_City    = tostring(LocationDetails.city)
+| extend AuthDetailsDynamic = todynamic(AuthenticationDetails)
+| mv-expand AuthDetailsDynamic
+| extend
+    AuthMethod = tostring(AuthDetailsDynamic.authenticationMethod),
+    AuthResultDetail = tostring(AuthDetailsDynamic.authenticationStepResultDetail)
+| summarize
+    HasCorrectPassword = max(iff(AuthResultDetail has_any ("Correct password","password correct"), true, false)),
+    HasMfaSuccess = max(iff(AuthResultDetail has_any ("MFA successfully completed","success") and AuthMethod has "MFA", true, false))
+    by CorrelationId, TimeGenerated, UserPrincipalName, ResultType, ResultDescription,
+       IPAddress, AppDisplayName, MFA_Country, MFA_State, MFA_City
+| where HasCorrectPassword == true
+| where HasMfaSuccess != true
+| join kind=leftouter CommonUserCountries on UserPrincipalName
+| extend
+    CountryRisk = case(
+        isempty(MFA_Country), "High - No Location Country",
+        isempty(CommonCountry), "High - No Baseline",
+        MFA_Country != CommonCountry, "High - Unusual Country",
+        "Low - Matches Baseline"
+    ),
+    EventDescription = strcat(
+        "MFA Failure: Correct password but MFA not completed. ",
+        "From ", IPAddress, " (", coalesce(MFA_City,"?"), ", ", coalesce(MFA_State,"?"), ", ", coalesce(MFA_Country,"?"), "). ",
+        "App: ", AppDisplayName, ". ",
+        iff(isnotempty(CommonCountry),
+            strcat("Baseline country: ", CommonCountry, " (", tostring(CommonCountryCount), " successes)."),
+            "No baseline data."
+        )
+    ),
+    RecommendedAction = "SOC: Contact user. If malicious: block session, reset password & MFA. If legit: educate user."
+| project TimeGenerated, UserPrincipalName, IPAddress, AppDisplayName,
+          MFA_City, MFA_State, MFA_Country,
+          CommonCountry, CommonCountryCount,
+          CountryRisk, EventDescription, RecommendedAction
+| order by TimeGenerated desc
