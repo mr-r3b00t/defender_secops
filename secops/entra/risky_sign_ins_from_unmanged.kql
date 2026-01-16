@@ -1,4 +1,5 @@
-let window = 30d;
+let range = 90d; //how many days to go back
+let window = 90d; // how many days to baseline the users for country sign ins
 let CommonUserCountries = (
     SigninLogs
     | where TimeGenerated > ago(window)
@@ -13,7 +14,7 @@ let CommonUserCountries = (
         CommonCountryCount = SignInCount
 );
 SigninLogs
-| where TimeGenerated > ago(31d)
+| where TimeGenerated > ago(range)
 | where ResultType in ("50074", "50076", "500121")
 | extend TrustType = tostring(DeviceDetail.trustType)
 | where TrustType != "Hybrid Azure AD joined"
